@@ -320,9 +320,12 @@ class PPortalClient:
         
         # 公開開始日
         if publish_start_from:
-            data.append(("searchConditionBean.kokaiKaishiYmdFrom", publish_start_from.replace("-", "/")))
+            data.append(("searchConditionBean.publicStartDateFrom", publish_start_from.replace("-", "/")))
         if publish_start_to:
-            data.append(("searchConditionBean.kokaiKaishiYmdTo", publish_start_to.replace("-", "/")))
+            data.append(("searchConditionBean.publicStartDateTo", publish_start_to.replace("-", "/")))
+        
+        # 検索ボタン（submitボタンの名前と値）
+        data.append(("OAA0102", "検索"))
         
         return data
     
@@ -388,32 +391,77 @@ class PPortalClient:
         return results, total
     
     def _parse_row(self, row) -> PPortalSearchResult | None:
-        """テーブル行をパース"""
+        """テーブル行をパース
+        
+        テーブル構造:
+        0: 調達案件番号
+        1: 調達案件名称
+        2: 調達機関
+        3: 所在地
+        4: 資料提供招請
+        5: 意見招請
+        6: 調達実施案件公示（日付・リンク）
+        7: 落札公示
+        """
         cells = row.find_all("td")
-        if len(cells) < 3:
+        if len(cells) < 4:
             return None
         
-        # 案件番号・リンク
-        case_number = ""
-        detail_url = ""
-        link = row.find("a")
-        if link:
-            case_number = link.get_text(strip=True)
-            href = link.get("href", "")
-            if href:
-                detail_url = urljoin(self.BASE_URL, href)
+        # 0: 調達案件番号
+        case_number = cells[0].get_text(strip=True) if cells else ""
         
-        # 案件名称（通常2列目）
+        # 1: 調達案件名称
         title = cells[1].get_text(strip=True) if len(cells) > 1 else ""
         
-        # 調達機関（通常3列目）
+        # 2: 調達機関
         organization = cells[2].get_text(strip=True) if len(cells) > 2 else ""
         
-        # 調達種別（通常4列目）
-        category = cells[3].get_text(strip=True) if len(cells) > 3 else ""
+        # 3: 所在地
+        location = cells[3].get_text(strip=True) if len(cells) > 3 else ""
         
-        # 公開期間（通常5列目）
+        # 6: 調達実施案件公示（日付・リンクを含む）
+        category = ""
         publish_start = None
+        detail_url = ""
+        
+        if len(cells) > 6:
+            cell6 = cells[6]
+            category_text = cell6.get_text(strip=True)
+            # 日付を抽出（例: "公示本文平成29年10月01日公開開始入札"）
+            import re
+            date_match = re.search(r"(令和|平成|西暦)?(\d+)年(\d+)月(\d+)日", category_text)
+            if date_match:
+                era = date_match.group(1) or ""
+                year = int(date_match.group(2))
+                month = int(date_match.group(3))
+                day = int(date_match.group(4))
+                # 和暦を西暦に変換
+                if era == "令和":
+                    year += 2018
+                elif era == "平成":
+                    year += 1988
+                publish_start = f"{year:04d}-{month:02d}-{day:02d}"
+            
+            # カテゴリを抽出
+            if "入札" in category_text:
+                category = "入札公告"
+            elif "落札" in category_text:
+                category = "落札公示"
+            elif "公募" in category_text:
+                category = "公募"
+            else:
+                category = "その他"
+            
+            # リンクを抽出
+            link = cell6.find("a")
+            if link:
+                href = link.get("href", "")
+                if href:
+                    detail_url = href  # JavaScriptリンクの場合はそのまま保存
+        
+        # 分類は所在地から推測（簡易）
+        classification = ""
+        
         publish_end = None
         if len(cells) > 4:
             date_text = cells[4].get_text(strip=True)

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  入札情報アグリゲータ 定期実行設定（launchd）
+  
+  インストール手順:
+  1. このファイルを編集し、YOUR_USERNAME と PROJECT_PATH を置き換える
+  2. ~/Library/LaunchAgents/ にコピー
+  3. launchctl load で有効化
+  
+  詳細は scripts/README.md を参照
+-->
+<dict>
+    <!-- ジョブの識別子（一意である必要あり） -->
+    <key>Label</key>
+    <string>com.user.bid-aggregator</string>
+    
+    <!-- 実行するプログラム -->
+    <key>ProgramArguments</key>
+    <array>
+        <!-- PROJECT_PATH を実際のパスに置き換えてください -->
+        <string>/Users/YOUR_USERNAME/path/to/bid-aggregator/scripts/daily_run.sh</string>
+        <string>--notify</string>
+    </array>
+    
+    <!-- 環境変数 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Slack Webhook URL（通知に使用） -->
+        <key>SLACK_WEBHOOK_URL</key>
+        <string>https://hooks.slack.com/services/YOUR/WEBHOOK/URL</string>
+        
+        <!-- プロジェクトディレクトリ -->
+        <key>BID_AGGREGATOR_DIR</key>
+        <string>/Users/YOUR_USERNAME/path/to/bid-aggregator</string>
+        
+        <!-- PATH（Python仮想環境用） -->
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+    
+    <!-- 実行スケジュール: 毎日 8:00 AM -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    
+    <!-- 標準出力のログファイル -->
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/path/to/bid-aggregator/logs/launchd_stdout.log</string>
+    
+    <!-- 標準エラー出力のログファイル -->
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/path/to/bid-aggregator/logs/launchd_stderr.log</string>
+    
+    <!-- 作業ディレクトリ -->
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USERNAME/path/to/bid-aggregator</string>
+    
+    <!-- システム起動時に実行しない（スケジュール実行のみ） -->
+    <key>RunAtLoad</key>
+    <false/>
+    
+    <!-- ネットワーク接続が必要 -->
+    <key>NetworkState</key>
+    <true/>
+</dict>
+</plist>

@@ -493,12 +493,16 @@ class PPortalClient:
         publish_start_from: str | None = None,
         publish_start_to: str | None = None,
         max_pages: int = 10,
+        page_size: int = 50,
     ) -> Generator[PPortalSearchResult, None, None]:
         """
         全ページを取得するジェネレータ
         
-        Note: 現時点ではページネーションは未実装（1ページ目のみ）
+        Args:
+            max_pages: 最大取得ページ数（デフォルト10）
+            page_size: 1ページあたりの件数（20, 50, 100）
         """
+        # 最初の検索を実行
         results, total = self.search(
             keyword=keyword,
             procurement_types=procurement_types,
@@ -507,11 +511,47 @@ class PPortalClient:
             publish_start_to=publish_start_to,
         )
         
+        yielded = 0
         for result in results:
             yield result
+            yielded += 1
         
-        logger.info(f"調達ポータル取得完了: {len(results)}件")
-    
+        # 総ページ数を計算
+        total_pages = (total + page_size - 1) // page_size
+        pages_to_fetch = min(total_pages, max_pages)
+        
+        logger.info(f"調達ポータル: 総{total}件, {total_pages}ページ中 最大{pages_to_fetch}ページ取得")
+        
+        # 2ページ目以降を取得
+        for page in range(1, pages_to_fetch):
+            self._wait_for_rate_limit()
+            
+            page_url = f"{self.BASE_URL}/UAA01/OAA0106?page={page}&size={page_size}"
+            logger.info(f"ページ {page + 1}/{pages_to_fetch} を取得中...")
+            
+            response = self._client.get(
+                page_url,
+                headers={
+                    "Referer": f"{self.BASE_URL}/UAA01/OAA0106?page={page-1}&size={page_size}",
+                },
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"ページ{page + 1}取得エラー: {response.status_code}")
+                break
+            
+            page_results, _ = self._parse_search_results(response.text)
+            
+            if not page_results:
+                logger.info(f"ページ{page + 1}: 結果なし、終了")
+                break
+            
+            for result in page_results:
+                yield result
+                yielded += 1
+        
+        logger.info(f"調達ポータル取得完了: {yielded}件")
+
     def get_raw_html(self, keyword: str = "") -> str:
         """
         デバッグ用: 生のHTMLを取得

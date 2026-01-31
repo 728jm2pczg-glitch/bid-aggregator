@@ -244,3 +244,229 @@ def estimate_chunks(
     end = datetime.strptime(end_date, "%Y-%m-%d")
     total_days = (end - start).days + 1
     return (total_days + days_per_chunk - 1) // days_per_chunk
+
+
+# =============================================================================
+# 調達ポータル取得
+# =============================================================================
+
+def run_pportal_ingest(
+    keyword: str = "",
+    max_pages: int = 10,
+    dry_run: bool = False,
+) -> FullIngestResult:
+    """
+    調達ポータルから入札情報を取得
+    
+    Args:
+        keyword: 検索キーワード
+        max_pages: 最大取得ページ数
+        dry_run: Trueの場合、DBへの保存をスキップ
+    
+    Returns:
+        FullIngestResult: 取得結果
+    """
+    from bid_aggregator.ingest.pportal_client import PPortalClient
+    from bid_aggregator.ingest.normalizer import normalize_pportal_results
+    
+    result = FullIngestResult()
+    
+    logger.info(f"調達ポータル取得開始: keyword='{keyword}', max_pages={max_pages}")
+    
+    fetched_results = []
+    
+    with PPortalClient() as client:
+        for item in client.search_all(keyword=keyword, max_pages=max_pages):
+            fetched_results.append(item)
+    
+    logger.info(f"調達ポータル取得: {len(fetched_results)}件")
+    
+    # 正規化
+    items, normalize_errors = normalize_pportal_results(fetched_results, source="pportal")
+    
+    # DB保存
+    new_count = 0
+    updated_count = 0
+    
+    if not dry_run:
+        for item in items:
+            try:
+                item_id, is_new = upsert_item(item)
+                if is_new:
+                    new_count += 1
+                else:
+                    updated_count += 1
+            except Exception as e:
+                logger.error(f"DB保存エラー: {e}")
+    else:
+        new_count = len(items)
+    
+    result.add_chunk_result(
+        from_date="pportal",
+        to_date=keyword or "(all)",
+        api_hits=len(fetched_results),
+        fetched=len(fetched_results),
+        new=new_count,
+        updated=updated_count,
+        errors=len(normalize_errors),
+    )
+    
+    logger.info(f"調達ポータル取得完了: {result.summary()}")
+    return result
+
+
+def run_combined_ingest(
+    query: QueryConfig | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    pportal_keyword: str = "",
+    pportal_max_pages: int = 5,
+    days_per_chunk: int = 7,
+    dry_run: bool = False,
+) -> dict:
+    """
+    KKJと調達ポータルの両方から取得
+    
+    Returns:
+        {"kkj": FullIngestResult, "pportal": FullIngestResult}
+    """
+    results = {}
+    
+    # KKJ取得
+    if query and start_date and end_date:
+        logger.info("=== KKJ取得 ===")
+        results["kkj"] = run_full_ingest(
+            query=query,
+            start_date=start_date,
+            end_date=end_date,
+            days_per_chunk=days_per_chunk,
+            dry_run=dry_run,
+        )
+    
+    # 調達ポータル取得
+    logger.info("=== 調達ポータル取得 ===")
+    results["pportal"] = run_pportal_ingest(
+        keyword=pportal_keyword,
+        max_pages=pportal_max_pages,
+        dry_run=dry_run,
+    )
+    
+    return results
+
+
+# =============================================================================
+# 調達ポータル通知付き取得
+# =============================================================================
+
+def run_pportal_ingest_with_notify(
+    keyword: str = "",
+    max_pages: int = 10,
+    slack_webhook_url: str | None = None,
+    email_to: str | None = None,
+    dry_run: bool = False,
+) -> FullIngestResult:
+    """
+    調達ポータルから取得して通知を送信
+    
+    Args:
+        keyword: 検索キーワード
+        max_pages: 最大取得ページ数
+        slack_webhook_url: Slack Webhook URL
+        email_to: メール送信先
+        dry_run: Trueの場合、DB保存・通知をスキップ
+    
+    Returns:
+        FullIngestResult
+    """
+    from bid_aggregator.ingest.pportal_client import PPortalClient
+    from bid_aggregator.ingest.normalizer import normalize_pportal_results
+    from bid_aggregator.notify.sender import (
+        send_slack_notification,
+        send_email_notification,
+        NotificationError,
+    )
+    
+    result = FullIngestResult()
+    
+    logger.info(f"調達ポータル取得開始（通知付き）: keyword='{keyword}', max_pages={max_pages}")
+    
+    fetched_results = []
+    
+    with PPortalClient() as client:
+        for item in client.search_all(keyword=keyword, max_pages=max_pages):
+            fetched_results.append(item)
+    
+    logger.info(f"調達ポータル取得: {len(fetched_results)}件")
+    
+    # 正規化
+    items, normalize_errors = normalize_pportal_results(fetched_results, source="pportal")
+    
+    # DB保存して新規アイテムを特定
+    new_items = []
+    updated_count = 0
+    
+    if not dry_run:
+        for item in items:
+            try:
+                item_id, is_new = upsert_item(item)
+                if is_new:
+                    new_items.append(item)
+                else:
+                    updated_count += 1
+            except Exception as e:
+                logger.error(f"DB保存エラー: {e}")
+    else:
+        new_items = items  # ドライランでは全て新規扱い
+    
+    result.add_chunk_result(
+        from_date="pportal",
+        to_date=keyword or "(all)",
+        api_hits=len(fetched_results),
+        fetched=len(fetched_results),
+        new=len(new_items),
+        updated=updated_count,
+        errors=len(normalize_errors),
+    )
+    
+    logger.info(f"調達ポータル: 新規{len(new_items)}件, 更新{updated_count}件")
+    
+    # 通知（新規アイテムがある場合）
+    if new_items:
+        search_name = f"調達ポータル: {keyword}" if keyword else "調達ポータル"
+        
+        # Slack通知
+        if slack_webhook_url:
+            if dry_run:
+                logger.info(f"[ドライラン] Slack通知スキップ: {len(new_items)}件")
+            else:
+                try:
+                    send_slack_notification(
+                        webhook_url=slack_webhook_url,
+                        items=new_items,
+                        saved_search_name=search_name,
+                        max_items=50,
+                    )
+                    logger.info(f"Slack通知送信成功: {len(new_items)}件")
+                except NotificationError as e:
+                    logger.error(f"Slack通知エラー: {e}")
+        
+        # メール通知
+        if email_to:
+            if dry_run:
+                logger.info(f"[ドライラン] メール通知スキップ: {email_to}")
+            else:
+                try:
+                    send_email_notification(
+                        to_address=email_to,
+                        items=new_items,
+                        saved_search_name=search_name,
+                        max_items=100,
+                    )
+                    logger.info(f"メール通知送信成功: {email_to}")
+                except NotificationError as e:
+                    logger.error(f"メール通知エラー: {e}")
+    else:
+        logger.info("新規アイテムなし、通知スキップ")
+    
+    logger.info(f"調達ポータル取得完了: {result.summary()}")
+    return result

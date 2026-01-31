@@ -114,13 +114,18 @@ def format_items_for_slack(
             ],
         })
     
-    # フッター
+    # フッター（ソースに応じて変更）
+    if "調達ポータル" in saved_search_name:
+        source_text = "出典: <https://www.p-portal.go.jp/|調達ポータル（政府電子調達）>"
+    else:
+        source_text = "出典: <https://www.kkj.go.jp/s/|官公需情報ポータルサイト>"
+    
     blocks.append({
         "type": "context",
         "elements": [
             {
                 "type": "mrkdwn",
-                "text": "出典: <https://www.kkj.go.jp/s/|官公需情報ポータルサイト>",
+                "text": source_text,
             },
         ],
     })

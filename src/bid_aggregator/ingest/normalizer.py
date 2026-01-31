@@ -121,3 +121,85 @@ def normalize_kkj_results(
             errors.append((result, e))
     
     return items, errors
+
+
+# =============================================================================
+# 調達ポータル正規化
+# =============================================================================
+
+def normalize_pportal_result(result, source: str = "pportal") -> Item:
+    """
+    調達ポータル検索結果を正規化してItemに変換
+    
+    Args:
+        result: PPortalSearchResult
+        source: ソース名
+    
+    Returns:
+        Item: 正規化されたアイテム
+    """
+    from bid_aggregator.ingest.pportal_client import PPortalSearchResult
+    
+    if not isinstance(result, PPortalSearchResult):
+        raise NormalizationError(f"無効な結果タイプ: {type(result)}")
+    
+    if not result.title:
+        raise NormalizationError(
+            "title（案件名称）が空です",
+            source_key=result.case_number,
+        )
+    
+    # 日付のパース
+    published_at = parse_iso8601_date(result.publish_start) if result.publish_start else None
+    deadline_at = parse_iso8601_date(result.publish_end) if result.publish_end else None
+    
+    # ハッシュ生成
+    content_hash = generate_content_hash(
+        title=result.title,
+        organization_name=result.organization or "不明",
+        published_at=result.publish_start,
+        deadline_at=result.publish_end,
+        url=result.detail_url,
+        source_item_id=result.case_number,
+    )
+    
+    body_hash = generate_body_hash("")  # 詳細本文は未取得
+    
+    return Item(
+        source=source,
+        source_item_id=result.case_number,
+        url=result.detail_url or "",
+        title=result.title,
+        organization_name=result.organization or "不明",
+        published_at=published_at,
+        deadline_at=deadline_at,
+        category=result.category,
+        region=None,  # 調達ポータルは所在地を別途取得可能
+        body="",  # 詳細は別途取得
+        body_hash=body_hash,
+        content_hash=content_hash,
+    )
+
+
+def normalize_pportal_results(
+    results: list,
+    source: str = "pportal",
+) -> tuple[list[Item], list[tuple[any, Exception]]]:
+    """
+    複数の調達ポータル検索結果を正規化
+    
+    Returns:
+        (normalized_items, errors): 正規化成功したItemリストとエラーリスト
+    """
+    items = []
+    errors = []
+    
+    for result in results:
+        try:
+            item = normalize_pportal_result(result, source)
+            items.append(item)
+        except Exception as e:
+            logger.warning(f"正規化エラー: case_number={getattr(result, 'case_number', 'unknown')}, error={e}")
+            errors.append((result, e))
+    
+    return items, errors

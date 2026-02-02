@@ -552,6 +552,44 @@ class PPortalClient:
         
         logger.info(f"調達ポータル取得完了: {yielded}件")
 
+    def get_detail(self, item_id: str) -> "PPortalDetailResult | None":
+        """
+        詳細ページを取得
+        
+        Args:
+            item_id: procurementItemInfoId
+        
+        Returns:
+            PPortalDetailResult または None
+        """
+        self._init_session()
+        return get_detail(self, item_id)
+    
+    def get_detail_by_url(self, detail_url: str) -> "PPortalDetailResult | None":
+        """
+        JavaScript URLから詳細を取得
+        
+        Args:
+            detail_url: JavaScript形式のURL
+        
+        Returns:
+            PPortalDetailResult または None
+        """
+        self._init_session()
+        return fetch_detail_by_url(self, detail_url)
+    
+        """
+        JavaScript URLから詳細を取得
+        
+        Args:
+            detail_url: JavaScript形式のURL
+        
+        Returns:
+            PPortalDetailResult または None
+        """
+        self._init_session()
+        return fetch_detail_by_url(self, detail_url)
+    
     def get_raw_html(self, keyword: str = "") -> str:
         """
         デバッグ用: 生のHTMLを取得
@@ -695,6 +733,143 @@ def debug_html_structure(keyword: str = "") -> None:
             print(f"\n'{name}' パターン: {matches[:5]}")
 
 
+# =============================================================================
+# 詳細ページ取得
+# =============================================================================
+
+@dataclass
+class PPortalDetailResult:
+    """調達ポータル詳細情報"""
+    case_number: str  # 調達案件番号
+    procurement_type: str  # 調達種別
+    classification: str  # 分類
+    title: str  # 調達案件名称
+    publish_start: str  # 公開開始日
+    organization: str  # 調達機関
+    location: str  # 調達機関所在地
+    item_category: str  # 調達品目分類
+    content: str  # 公告内容
+    document_urls: list[str]  # 調達資料URL
+    raw_html: str | None = None  # 元HTML（デバッグ用）
+    
+    def to_dict(self) -> dict:
+        return {
+            "case_number": self.case_number,
+            "procurement_type": self.procurement_type,
+            "classification": self.classification,
+            "title": self.title,
+            "publish_start": self.publish_start,
+            "organization": self.organization,
+            "location": self.location,
+            "item_category": self.item_category,
+            "content": self.content,
+            "document_urls": self.document_urls,
+        }
+
+def _extract_detail_id(detail_url: str) -> str | None:
+    """JavaScript URLからprocurementItemInfoIdを抽出"""
+    match = re.search(r"procurementItemInfoId'.*?value:'(\d+)'", detail_url)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _parse_detail_page(html: str) -> "PPortalDetailResult | None":
+    """詳細ページHTMLをパース"""
+    soup = BeautifulSoup(html, "html.parser")
+    
+    table = soup.select_one("table")
+    if not table:
+        logger.warning("詳細テーブルが見つかりません")
+        return None
+    
+    # 項目を抽出
+    data = {}
+    for row in table.select("tr"):
+        th = row.select_one("th")
+        td = row.select_one("td")
+        if th and td:
+            key = th.get_text(strip=True)
+            value = td.get_text(strip=True)
+            data[key] = value
+    
+    # 調達資料URLを抽出
+    document_urls = []
+    for link in table.select("a[href]"):
+        href = link.get("href", "")
+        if href and not href.startswith("javascript:"):
+            document_urls.append(href)
+    
+    return PPortalDetailResult(
+        case_number=data.get("調達案件番号", ""),
+        procurement_type=data.get("調達種別", ""),
+        classification=data.get("分類", ""),
+        title=data.get("調達案件名称", ""),
+        publish_start=data.get("公開開始日", ""),
+        organization=data.get("調達機関", ""),
+        location=data.get("調達機関所在地", ""),
+        item_category=data.get("調達品目分類", ""),
+        content=data.get("公告内容", ""),
+        document_urls=document_urls,
+        raw_html=html,
+    )
+
+
+def get_detail(client: "PPortalClient", item_id: str) -> "PPortalDetailResult | None":
+    """
+    詳細ページを取得
+    
+    Args:
+        client: PPortalClientインスタンス（セッション初期化済み）
+        item_id: procurementItemInfoId
+    
+    Returns:
+        PPortalDetailResult または None
+    """
+    client._wait_for_rate_limit()
+    
+    detail_url = f"{client.BASE_URL}/UAA01/OAA0104"
+    
+    response = client._client.post(
+        detail_url,
+        data={
+            "_csrf": client._csrf_token,
+            "procurementItemInfoId": item_id,
+            "SyFromFlg": "1",
+        },
+        headers={
+            "Referer": f"{client.BASE_URL}/UAA01/OAA0106",
+        },
+    )
+    
+    if response.status_code != 200:
+        logger.warning(f"詳細ページ取得エラー: {response.status_code}")
+        return None
+    
+    return _parse_detail_page(response.text)
+
+
+def fetch_detail_by_url(client: "PPortalClient", detail_url: str) -> "PPortalDetailResult | None":
+    """
+    JavaScript URLから詳細を取得
+    
+    Args:
+        client: PPortalClientインスタンス
+        detail_url: JavaScript形式のURL
+    
+    Returns:
+        PPortalDetailResult または None
+    """
+    item_id = _extract_detail_id(detail_url)
+    if not item_id:
+        logger.warning(f"IDを抽出できません: {detail_url}")
+        return None
+    
+    return get_detail(client, item_id)
+
+
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -755,3 +930,5 @@ if __name__ == "__main__":
             print(f"エラー: {e}")
             import traceback
             traceback.print_exc()
+
+

@@ -13,6 +13,8 @@
 #   BID_AGGREGATOR_DIR  プロジェクトディレクトリ（デフォルト: スクリプトの親ディレクトリ）
 #   SLACK_WEBHOOK_URL   Slack通知先（--notify時に使用）
 #   NOTIFY_EMAIL        メール通知先（--notify時に使用、Slack優先）
+#   PPORTAL_KEYWORD     調達ポータル検索キーワード（デフォルト: 空=全件）
+#   PPORTAL_MAX_PAGES   調達ポータル最大ページ数（デフォルト: 10）
 #
 # =============================================================================
 
@@ -29,6 +31,10 @@ mkdir -p "$LOG_DIR"
 # ログファイル（日付付き）
 DATE=$(date +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/daily_run_$DATE.log"
+
+# 調達ポータル設定
+PPORTAL_KEYWORD="${PPORTAL_KEYWORD:-}"
+PPORTAL_MAX_PAGES="${PPORTAL_MAX_PAGES:-10}"
 
 # 関数: ログ出力
 log() {
@@ -57,35 +63,68 @@ fi
 log "仮想環境を有効化: $VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
-# bid-cliの確認
-if ! command -v bid-cli &> /dev/null; then
-    error_exit "bid-cli が見つかりません"
+# プロジェクトディレクトリに移動
+cd "$PROJECT_DIR"
+
+# bid-cliの確認（オプショナル）
+BID_CLI_AVAILABLE=false
+if command -v bid-cli &> /dev/null; then
+    BID_CLI_AVAILABLE=true
 fi
 
 # 設定ファイルの確認
 CONFIG_FILE="$PROJECT_DIR/config/queries.yml"
-if [ ! -f "$CONFIG_FILE" ]; then
-    error_exit "設定ファイルが見つかりません: $CONFIG_FILE"
-fi
 
 # =============================================================================
-# 1. データ取得
+# 1. KKJ データ取得
 # =============================================================================
 
-log "--- データ取得開始 ---"
-cd "$PROJECT_DIR"
-
-if bid-cli ingest --queries "$CONFIG_FILE" >> "$LOG_FILE" 2>&1; then
-    log "データ取得完了"
+if [ -f "$CONFIG_FILE" ] && [ "$BID_CLI_AVAILABLE" = true ]; then
+    log "--- KKJ データ取得開始 ---"
+    
+    if bid-cli ingest --queries "$CONFIG_FILE" >> "$LOG_FILE" 2>&1; then
+        log "KKJ データ取得完了"
+    else
+        log "WARNING: KKJ データ取得でエラーが発生しました（処理は継続）"
+    fi
 else
-    log "WARNING: データ取得でエラーが発生しました（処理は継続）"
+    log "--- KKJ データ取得スキップ（bid-cli未設定または設定ファイルなし）---"
 fi
 
 # =============================================================================
-# 2. 保存検索の実行（--notify オプション時）
+# 2. 調達ポータル データ取得
 # =============================================================================
 
+log "--- 調達ポータル データ取得開始 ---"
+log "キーワード: '${PPORTAL_KEYWORD:-（全件）}', 最大ページ: $PPORTAL_MAX_PAGES"
+
+# 通知オプションの構築
+PPORTAL_OPTS=""
 if [ "$1" = "--notify" ]; then
+    if [ -n "$SLACK_WEBHOOK_URL" ]; then
+        PPORTAL_OPTS="--slack-webhook $SLACK_WEBHOOK_URL"
+        log "調達ポータル通知: Slack"
+    elif [ -n "$NOTIFY_EMAIL" ]; then
+        PPORTAL_OPTS="--email $NOTIFY_EMAIL"
+        log "調達ポータル通知: Email ($NOTIFY_EMAIL)"
+    fi
+fi
+
+# 調達ポータル取得実行
+if python -m bid_aggregator.cli.pportal_ingest \
+    -k "$PPORTAL_KEYWORD" \
+    --max-pages "$PPORTAL_MAX_PAGES" \
+    $PPORTAL_OPTS >> "$LOG_FILE" 2>&1; then
+    log "調達ポータル データ取得完了"
+else
+    log "WARNING: 調達ポータル取得でエラーが発生しました（処理は継続）"
+fi
+
+# =============================================================================
+# 3. 保存検索の実行（--notify オプション時、bid-cli使用可能時）
+# =============================================================================
+
+if [ "$1" = "--notify" ] && [ "$BID_CLI_AVAILABLE" = true ]; then
     log "--- 保存検索・通知開始 ---"
     
     # 通知先の決定
@@ -107,7 +146,7 @@ if [ "$1" = "--notify" ]; then
     # 有効な保存検索を実行
     if [ -n "$NOTIFY_CHANNEL" ]; then
         # 保存検索一覧を取得して実行
-        SAVED_SEARCHES=$(bid-cli saved-search list --enabled-only 2>/dev/null | grep -E "^\│" | awk -F'│' '{print $3}' | tr -d ' ' | grep -v "^$" | grep -v "名前")
+        SAVED_SEARCHES=$(bid-cli saved-search list --enabled-only 2>/dev/null | grep -E "^\│" | awk -F'│' '{print $3}' | tr -d ' ' | grep -v "^$" | grep -v "名前" || true)
         
         if [ -n "$SAVED_SEARCHES" ]; then
             for name in $SAVED_SEARCHES; do
@@ -127,18 +166,35 @@ if [ "$1" = "--notify" ]; then
         fi
     fi
 else
-    log "通知はスキップ（--notify オプションなし）"
+    log "保存検索・通知はスキップ"
 fi
 
 # =============================================================================
-# 3. 統計情報の出力
+# 4. 統計情報の出力
 # =============================================================================
 
 log "--- 統計情報 ---"
-bid-cli db stats >> "$LOG_FILE" 2>&1 || true
+if [ "$BID_CLI_AVAILABLE" = true ]; then
+    bid-cli db stats >> "$LOG_FILE" 2>&1 || true
+else
+    # bid-cliがない場合はPythonで統計を取得
+    python -c "
+from bid_aggregator.core.database import get_connection
+conn = get_connection()
+cursor = conn.cursor()
+cursor.execute('SELECT COUNT(*) FROM items')
+total = cursor.fetchone()[0]
+cursor.execute('SELECT source, COUNT(*) FROM items GROUP BY source')
+by_source = cursor.fetchall()
+print(f'総アイテム数: {total}')
+for source, count in by_source:
+    print(f'  {source}: {count}')
+conn.close()
+" >> "$LOG_FILE" 2>&1 || true
+fi
 
 # =============================================================================
-# 4. 古いログの削除（30日以上前）
+# 5. 古いログの削除（30日以上前）
 # =============================================================================
 
 log "--- 古いログの削除 ---"
